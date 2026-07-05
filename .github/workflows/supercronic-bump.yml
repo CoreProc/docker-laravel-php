@@ -26,6 +26,8 @@ jobs:
           - 8.3-frankenphp-alpine
           - 8.4-fpm-alpine
           - 8.4-frankenphp-alpine
+          - 8.5-fpm-alpine
+          - 8.5-frankenphp-alpine
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

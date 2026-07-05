@@ -8,8 +8,10 @@ Base PHP Docker images for CoreProc Laravel apps, published to Docker Hub as [`c
 
 | Branch / Docker tag | Base image | Platforms |
 |---|---|---|
+| [`8.5-fpm-alpine`](../../tree/8.5-fpm-alpine) | `php:8.5-fpm-alpine` | amd64, arm64 |
 | [`8.4-fpm-alpine`](../../tree/8.4-fpm-alpine) | `php:8.4-fpm-alpine` | amd64, arm64 |
 | [`8.3-fpm-alpine`](../../tree/8.3-fpm-alpine) | `php:8.3-fpm-alpine3.20` | amd64, arm64 |
+| [`8.5-frankenphp-alpine`](../../tree/8.5-frankenphp-alpine) | `dunglas/frankenphp:php8.5-alpine` | amd64, arm64 |
 | [`8.4-frankenphp-alpine`](../../tree/8.4-frankenphp-alpine) | `dunglas/frankenphp:php8.4-alpine` | amd64, arm64 |
 | [`8.3-frankenphp-alpine`](../../tree/8.3-frankenphp-alpine) | `dunglas/frankenphp:php8.3-alpine` | amd64, arm64 |
 

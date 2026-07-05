@@ -21,6 +21,8 @@ on:
           - 8.3-frankenphp-alpine
           - 8.4-fpm-alpine
           - 8.4-frankenphp-alpine
+          - 8.5-fpm-alpine
+          - 8.5-frankenphp-alpine
 
 permissions:
   contents: read
@@ -40,7 +42,7 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.branch }}" != "all" ]; then
             echo 'branches=["${{ inputs.branch }}"]' >> "$GITHUB_OUTPUT"
           else
-            echo 'branches=["8.3-fpm-alpine","8.3-frankenphp-alpine","8.4-fpm-alpine","8.4-frankenphp-alpine"]' >> "$GITHUB_OUTPUT"
+            echo 'branches=["8.3-fpm-alpine","8.3-frankenphp-alpine","8.4-fpm-alpine","8.4-frankenphp-alpine","8.5-fpm-alpine","8.5-frankenphp-alpine"]' >> "$GITHUB_OUTPUT"
           fi
 
   build:
