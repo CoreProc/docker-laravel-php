@@ -1,0 +1,82 @@
+name: Supercronic version check
+
+# Weekly check of https://github.com/aptible/supercronic/releases. When a new
+# release appears, opens one PR per variant branch updating SUPERCRONIC_VERSION
+# and both per-arch SHA1 checksums (computed from the downloaded binaries — the
+# Supercronic README no longer publishes sums). Merging a PR does not publish
+# anything by itself: run "Build and push images" for that branch, or wait for
+# the weekly rebuild.
+
+on:
+  schedule:
+    - cron: '0 16 * * 1' # Mondays 16:00 UTC, before the Monday 18:00 rebuild
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        branch:
+          - 8.3-fpm-alpine
+          - 8.3-frankenphp-alpine
+          - 8.4-fpm-alpine
+          - 8.4-frankenphp-alpine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+
+      - name: Compare latest release to pinned version
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest=$(gh api repos/aptible/supercronic/releases/latest --jq .tag_name)
+          current=$(grep -o 'SUPERCRONIC_VERSION=v[0-9.]*' Dockerfile | cut -d= -f2)
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "${{ matrix.branch }}: pinned $current, latest $latest"
+
+      - name: Update Dockerfile
+        if: steps.ver.outputs.latest != steps.ver.outputs.current
+        run: |
+          ver="${{ steps.ver.outputs.latest }}"
+          base="https://github.com/aptible/supercronic/releases/download/${ver}"
+          curl -fsSL -o /tmp/sc-amd64 "${base}/supercronic-linux-amd64"
+          curl -fsSL -o /tmp/sc-arm64 "${base}/supercronic-linux-arm64"
+          chmod +x /tmp/sc-amd64
+          reported=$(/tmp/sc-amd64 -version)
+          if [ "$reported" != "$ver" ]; then
+            echo "downloaded binary reports '$reported', expected '$ver'" >&2
+            exit 1
+          fi
+          sha_amd64=$(sha1sum /tmp/sc-amd64 | cut -d' ' -f1)
+          sha_arm64=$(sha1sum /tmp/sc-arm64 | cut -d' ' -f1)
+          sed -i \
+            -e "s|SUPERCRONIC_VERSION=v[0-9.]*|SUPERCRONIC_VERSION=${ver}|" \
+            -e "s|SUPERCRONIC_SHA1SUM_AMD64=[0-9a-f]*|SUPERCRONIC_SHA1SUM_AMD64=${sha_amd64}|" \
+            -e "s|SUPERCRONIC_SHA1SUM_ARM64=[0-9a-f]*|SUPERCRONIC_SHA1SUM_ARM64=${sha_arm64}|" \
+            Dockerfile
+          git diff Dockerfile
+
+      - name: Open pull request
+        if: steps.ver.outputs.latest != steps.ver.outputs.current
+        uses: peter-evans/create-pull-request@v7
+        with:
+          base: ${{ matrix.branch }}
+          branch: supercronic-bump/${{ matrix.branch }}
+          title: 'Update supercronic to ${{ steps.ver.outputs.latest }} (${{ matrix.branch }})'
+          commit-message: 'Update supercronic to ${{ steps.ver.outputs.latest }}'
+          body: |
+            Automated bump of Supercronic to [${{ steps.ver.outputs.latest }}](https://github.com/aptible/supercronic/releases/tag/${{ steps.ver.outputs.latest }}) on `${{ matrix.branch }}`.
+
+            SHA1 checksums were computed from the downloaded release binaries, and the amd64 binary was executed to confirm it reports the expected version.
+
+            After merging, run the "Build and push images" workflow for this branch (or wait for the weekly rebuild) to publish.
+          delete-branch: true
