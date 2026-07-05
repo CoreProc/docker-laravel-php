@@ -2,6 +2,8 @@
 
 Base PHP Docker images for CoreProc Laravel apps, published to Docker Hub as [`coreproc/laravel-php`](https://hub.docker.com/r/coreproc/laravel-php). Each image includes common PHP extensions, Composer, [Supercronic](https://github.com/aptible/supercronic) for cron jobs, and supervisor.
 
+Release history: see [CHANGELOG.md](CHANGELOG.md) and the [GitHub releases](../../releases).
+
 ## Branch-per-variant model
 
 **Each git branch is a separate image variant, and the branch name is the Docker tag.** This `main` branch holds no Dockerfile — switch to a variant branch to work on an image.
