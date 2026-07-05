@@ -34,6 +34,10 @@ Preferred publishing path: the "Build and push images" workflow (Actions tab, or
 - `xdebug` and `pcov` are installed via pecl but intentionally **not enabled** — downstream dev environments enable them.
 - `gd-dev` is deliberately removed after the gd extension is built (`apk del gd-dev`) to drop libtiff CVEs from the final image — don't "clean up" that line.
 
+## Releases
+
+Cross-variant changes are published as GitHub releases tagged `vYYYY.MM.DD[.N]`, targeting a variant branch. When publishing a release, also add an entry to `CHANGELOG.md` on `main`.
+
 ## Recurring task: updating Supercronic
 
 The `supercronic-bump.yml` workflow on `main` checks https://github.com/aptible/supercronic/releases weekly and opens one PR per variant branch with the new version and freshly computed per-arch SHA1 checksums. Merging a PR does not publish by itself — run the build workflow for that branch or wait for the weekly rebuild.
