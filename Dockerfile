@@ -41,7 +41,7 @@ RUN SUPERCRONIC="supercronic-linux-${TARGETARCH}" \
  && chmod +x "$SUPERCRONIC" \
  && mv "$SUPERCRONIC" /usr/local/bin/supercronic
 
-# Install PHP extensions.
+# Install PHP extensions. opcache is not listed: PHP >= 8.5 builds it statically.
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install \
     gd \
@@ -50,7 +50,6 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
     pdo_mysql \
     bcmath \
     curl \
-    opcache \
     mbstring \
     exif \
     pcntl \
