@@ -26,9 +26,9 @@ RUN apk add --no-cache --virtual .build-deps \
 
 # Use Supercronic for cron jobs. Latest releases available at https://github.com/aptible/supercronic/releases
 ARG TARGETARCH
-ENV SUPERCRONIC_VERSION=v0.2.47 \
-    SUPERCRONIC_SHA1SUM_AMD64=712d2ece75da6f6e530192a151488578153e4e96 \
-    SUPERCRONIC_SHA1SUM_ARM64=93323899ddca3f1198f1796a4bf4418ed1e7982e
+ENV SUPERCRONIC_VERSION=v0.2.50 \
+    SUPERCRONIC_SHA1SUM_AMD64=0795da10bf6303e9680a2c2bd8dd6b9aa33ebda2 \
+    SUPERCRONIC_SHA1SUM_ARM64=e0023a0346354a153a4a2708c657308890823d14
 
 RUN SUPERCRONIC="supercronic-linux-${TARGETARCH}" \
  && case "$TARGETARCH" in \
