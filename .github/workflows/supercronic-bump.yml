@@ -1,11 +1,16 @@
 name: Supercronic version check
 
 # Weekly check of https://github.com/aptible/supercronic/releases. When a new
-# release appears, opens one PR per variant branch updating SUPERCRONIC_VERSION
-# and both per-arch SHA1 checksums (computed from the downloaded binaries — the
-# Supercronic README no longer publishes sums). Merging a PR does not publish
-# anything by itself: run "Build and push images" for that branch, or wait for
-# the weekly rebuild.
+# release appears, every variant branch that is behind gets SUPERCRONIC_VERSION
+# and both per-arch SHA1 checksums updated (computed from the downloaded
+# binaries — the Supercronic README no longer publishes sums), then the bumped
+# Dockerfile is built and smoke-tested natively on amd64 and arm64.
+#
+# A variant that passes on both arches is committed straight to its branch, so
+# the Monday 18:00 rebuild publishes it; a manual run also dispatches that
+# rebuild itself. A variant that fails gets a PR for a human instead, and the
+# run fails so GitHub sends a notification. Bumps used to always wait in PRs,
+# which sat unmerged for months while the images shipped a vulnerable Go.
 
 on:
   schedule:
@@ -13,72 +18,210 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
-  check:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      branches: ${{ steps.ver.outputs.branches }}
+      sha_amd64: ${{ steps.ver.outputs.sha_amd64 }}
+      sha_arm64: ${{ steps.ver.outputs.sha_arm64 }}
+    steps:
+      - name: Find variants behind the latest release
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCHES: >-
+            8.3-fpm-alpine 8.3-frankenphp-alpine
+            8.4-fpm-alpine 8.4-frankenphp-alpine
+            8.5-fpm-alpine 8.5-frankenphp-alpine
+        run: |
+          latest=$(gh api repos/aptible/supercronic/releases/latest --jq .tag_name)
+          behind=()
+          for b in $BRANCHES; do
+            current=$(gh api -H 'Accept: application/vnd.github.raw' \
+              "repos/${GITHUB_REPOSITORY}/contents/Dockerfile?ref=${b}" \
+              | grep -o 'SUPERCRONIC_VERSION=v[0-9.]*' | cut -d= -f2)
+            echo "${b}: pinned ${current}, latest ${latest}"
+            [ "$current" = "$latest" ] || behind+=("$b")
+          done
+          echo "version=${latest}" >> "$GITHUB_OUTPUT"
+          echo "branches=$(jq -cn '$ARGS.positional' --args "${behind[@]}")" >> "$GITHUB_OUTPUT"
+          [ ${#behind[@]} -gt 0 ] || exit 0
+
+          base="https://github.com/aptible/supercronic/releases/download/${latest}"
+          curl -fsSL -o /tmp/sc-amd64 "${base}/supercronic-linux-amd64"
+          curl -fsSL -o /tmp/sc-arm64 "${base}/supercronic-linux-arm64"
+          chmod +x /tmp/sc-amd64
+          reported=$(/tmp/sc-amd64 -version)
+          if [ "$reported" != "$latest" ]; then
+            echo "downloaded binary reports '${reported}', expected '${latest}'" >&2
+            exit 1
+          fi
+          echo "sha_amd64=$(sha1sum /tmp/sc-amd64 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "sha_arm64=$(sha1sum /tmp/sc-arm64 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+  smoke:
+    needs: detect
+    if: needs.detect.outputs.branches != '[]'
     strategy:
       fail-fast: false
       matrix:
-        branch:
-          - 8.3-fpm-alpine
-          - 8.3-frankenphp-alpine
-          - 8.4-fpm-alpine
-          - 8.4-frankenphp-alpine
-          - 8.5-fpm-alpine
-          - 8.5-frankenphp-alpine
-    runs-on: ubuntu-latest
+        branch: ${{ fromJSON(needs.detect.outputs.branches) }}
+        platform:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.platform.runner }}
+    env:
+      VERSION: ${{ needs.detect.outputs.version }}
+      SHA_AMD64: ${{ needs.detect.outputs.sha_amd64 }}
+      SHA_ARM64: ${{ needs.detect.outputs.sha_arm64 }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
 
-      - name: Compare latest release to pinned version
-        id: ver
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          latest=$(gh api repos/aptible/supercronic/releases/latest --jq .tag_name)
-          current=$(grep -o 'SUPERCRONIC_VERSION=v[0-9.]*' Dockerfile | cut -d= -f2)
-          echo "latest=$latest" >> "$GITHUB_OUTPUT"
-          echo "current=$current" >> "$GITHUB_OUTPUT"
-          echo "${{ matrix.branch }}: pinned $current, latest $latest"
-
       - name: Update Dockerfile
-        if: steps.ver.outputs.latest != steps.ver.outputs.current
         run: |
-          ver="${{ steps.ver.outputs.latest }}"
-          base="https://github.com/aptible/supercronic/releases/download/${ver}"
-          curl -fsSL -o /tmp/sc-amd64 "${base}/supercronic-linux-amd64"
-          curl -fsSL -o /tmp/sc-arm64 "${base}/supercronic-linux-arm64"
-          chmod +x /tmp/sc-amd64
-          reported=$(/tmp/sc-amd64 -version)
-          if [ "$reported" != "$ver" ]; then
-            echo "downloaded binary reports '$reported', expected '$ver'" >&2
-            exit 1
-          fi
-          sha_amd64=$(sha1sum /tmp/sc-amd64 | cut -d' ' -f1)
-          sha_arm64=$(sha1sum /tmp/sc-arm64 | cut -d' ' -f1)
           sed -i \
-            -e "s|SUPERCRONIC_VERSION=v[0-9.]*|SUPERCRONIC_VERSION=${ver}|" \
-            -e "s|SUPERCRONIC_SHA1SUM_AMD64=[0-9a-f]*|SUPERCRONIC_SHA1SUM_AMD64=${sha_amd64}|" \
-            -e "s|SUPERCRONIC_SHA1SUM_ARM64=[0-9a-f]*|SUPERCRONIC_SHA1SUM_ARM64=${sha_arm64}|" \
+            -e "s|SUPERCRONIC_VERSION=v[0-9.]*|SUPERCRONIC_VERSION=${VERSION}|" \
+            -e "s|SUPERCRONIC_SHA1SUM_AMD64=[0-9a-f]*|SUPERCRONIC_SHA1SUM_AMD64=${SHA_AMD64}|" \
+            -e "s|SUPERCRONIC_SHA1SUM_ARM64=[0-9a-f]*|SUPERCRONIC_SHA1SUM_ARM64=${SHA_ARM64}|" \
             Dockerfile
           git diff Dockerfile
 
-      - name: Open pull request
-        if: steps.ver.outputs.latest != steps.ver.outputs.current
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.platform.arch }}
+          load: true
+          tags: smoke-test:${{ matrix.branch }}
+
+      - name: Smoke test (native ${{ matrix.platform.arch }})
+        run: |
+          docker run --rm -e VERSION smoke-test:${{ matrix.branch }} sh -ec '
+            php -v
+            [ "$(supercronic -version)" = "$VERSION" ]
+            echo "* * * * * true" > /tmp/ct
+            supercronic -test /tmp/ct'
+
+      - name: Record pass
+        run: mkdir -p /tmp/pass && touch /tmp/pass/${{ matrix.platform.arch }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pass-${{ matrix.branch }}-${{ matrix.platform.arch }}
+          path: /tmp/pass/*
+          retention-days: 1
+
+  apply:
+    needs: [detect, smoke]
+    # Runs after a partial smoke failure too: each branch checks its own result.
+    if: ${{ !cancelled() && needs.detect.result == 'success' && needs.detect.outputs.branches != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJSON(needs.detect.outputs.branches) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      BRANCH: ${{ matrix.branch }}
+      VERSION: ${{ needs.detect.outputs.version }}
+      SHA_AMD64: ${{ needs.detect.outputs.sha_amd64 }}
+      SHA_ARM64: ${{ needs.detect.outputs.sha_arm64 }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/download-artifact@v4
+        # No artifact at all just means neither arch passed.
+        continue-on-error: true
+        with:
+          pattern: pass-${{ matrix.branch }}-*
+          path: /tmp/pass
+          merge-multiple: true
+
+      - name: Check smoke results
+        id: smoke
+        run: |
+          if [ -f /tmp/pass/amd64 ] && [ -f /tmp/pass/arm64 ]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ matrix.branch }}
+
+      - name: Update Dockerfile
+        run: |
+          sed -i \
+            -e "s|SUPERCRONIC_VERSION=v[0-9.]*|SUPERCRONIC_VERSION=${VERSION}|" \
+            -e "s|SUPERCRONIC_SHA1SUM_AMD64=[0-9a-f]*|SUPERCRONIC_SHA1SUM_AMD64=${SHA_AMD64}|" \
+            -e "s|SUPERCRONIC_SHA1SUM_ARM64=[0-9a-f]*|SUPERCRONIC_SHA1SUM_ARM64=${SHA_ARM64}|" \
+            Dockerfile
+          git diff Dockerfile
+
+      - name: Commit to variant branch
+        if: steps.smoke.outputs.passed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -am "Update supercronic to ${VERSION}" \
+            -m "Smoke-tested on linux/amd64 and linux/arm64 in ${RUN_URL}"
+          git push origin "HEAD:${BRANCH}"
+          # A PR left by an earlier failed attempt is superseded now.
+          gh pr list --head "supercronic-bump/${BRANCH}" --state open --json number --jq '.[].number' \
+            | while read -r n; do
+                gh pr close "$n" --delete-branch \
+                  --comment "Superseded: ${VERSION} passed the smoke test and was committed to \`${BRANCH}\` in ${RUN_URL}."
+              done
+
+      - name: Open pull request for review
+        if: steps.smoke.outputs.passed != 'true'
         uses: peter-evans/create-pull-request@v7
         with:
           base: ${{ matrix.branch }}
           branch: supercronic-bump/${{ matrix.branch }}
-          title: 'Update supercronic to ${{ steps.ver.outputs.latest }} (${{ matrix.branch }})'
-          commit-message: 'Update supercronic to ${{ steps.ver.outputs.latest }}'
+          title: 'Update supercronic to ${{ needs.detect.outputs.version }} (${{ matrix.branch }})'
+          commit-message: 'Update supercronic to ${{ needs.detect.outputs.version }}'
           body: |
-            Automated bump of Supercronic to [${{ steps.ver.outputs.latest }}](https://github.com/aptible/supercronic/releases/tag/${{ steps.ver.outputs.latest }}) on `${{ matrix.branch }}`.
+            Automated bump of Supercronic to [${{ needs.detect.outputs.version }}](https://github.com/aptible/supercronic/releases/tag/${{ needs.detect.outputs.version }}) on `${{ matrix.branch }}`.
 
-            SHA1 checksums were computed from the downloaded release binaries, and the amd64 binary was executed to confirm it reports the expected version.
-
-            After merging, run the "Build and push images" workflow for this branch (or wait for the weekly rebuild) to publish.
+            **The smoke test failed on at least one arch** (see ${{ env.RUN_URL }}), so this was not committed automatically. Fix the branch, then merge and run "Build and push images" for it. The next weekly check closes this PR on its own if the bump passes.
           delete-branch: true
+
+      - name: Fail so the smoke failure gets noticed
+        if: steps.smoke.outputs.passed != 'true'
+        run: |
+          echo "::error::${BRANCH}: Supercronic ${VERSION} failed the smoke test; opened a PR instead of committing."
+          exit 1
+
+  rebuild:
+    needs: apply
+    # Scheduled runs leave publishing to the Monday 18:00 rebuild.
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.apply.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch "Build and push images"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run build-images.yml --ref main -f branch=all
