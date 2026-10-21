@@ -225,3 +225,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: gh workflow run build-images.yml --ref main -f branch=all
+
+  # GitHub disables scheduled workflows in a public repo after 60 days with no
+  # repository activity; it did so to the Supercronic check on 2026-10-19,
+  # silently. Re-enabling an active workflow resets that timer, so every run
+  # renews both schedules without needing keepalive commits.
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Keep both scheduled workflows enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for wf in build-images.yml supercronic-bump.yml; do
+            gh api -X PUT "repos/${GH_REPO}/actions/workflows/${wf}/enable"
+            echo "${wf}: $(gh api "repos/${GH_REPO}/actions/workflows/${wf}" --jq .state)"
+          done
