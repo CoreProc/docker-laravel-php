@@ -5,6 +5,12 @@ name: Build and push images
 # Each arch builds and smoke-tests natively (no QEMU), pushes by digest, and a
 # merge job stitches the multi-arch manifest — the branch tag on Docker Hub is
 # only updated after both arches pass.
+#
+# A final job scans each published tag with Grype and keeps one issue per
+# variant (label "vulnerability-scan") listing fixable high/critical findings,
+# closing it once the tag is clean. Findings never block publishing: many come
+# from upstream base images, and blocking would also hold back the security
+# updates this rebuild exists to ship.
 
 on:
   schedule:
@@ -137,3 +143,98 @@ jobs:
 
       - name: Inspect published tag
         run: docker buildx imagetools inspect coreproc/laravel-php:${{ matrix.branch }}
+
+  scan:
+    needs: [prepare, merge-and-tag]
+    # Scan whatever is published, even when one variant's build failed.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCHES: ${{ join(fromJSON(needs.prepare.outputs.branches), ' ') }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # Pinned by digest, not tag: the Trivy action's tags were hijacked in
+      # March 2026, and this job holds a token that can write issues.
+      GRYPE_IMAGE: anchore/grype:v0.120.1@sha256:e4a44ef45d285b829ce6efe2642980329661bd2d18eab5fc539138d4adaebbbe
+    steps:
+      - name: Scan published tags
+        run: |
+          mkdir -p /tmp/grype-db /tmp/scan
+          failed=0
+          # One job for every variant so the vulnerability DB downloads once.
+          for b in $BRANCHES; do
+            if ! docker run --rm -e GRYPE_DB_CACHE_DIR=/db -v /tmp/grype-db:/db "$GRYPE_IMAGE" \
+                "registry:coreproc/laravel-php:${b}" --platform linux/amd64 --only-fixed -o json \
+                > "/tmp/scan/${b}.json"; then
+              echo "::error::Grype scan of ${b} failed"
+              rm -f "/tmp/scan/${b}.json"
+              failed=1
+            fi
+          done
+          exit $failed
+
+      - name: Update issues
+        # Report the variants that did scan, even if another one failed.
+        if: ${{ !cancelled() }}
+        run: |
+          gh label create vulnerability-scan --color B60205 \
+            --description 'Fixable high/critical findings from the weekly Grype scan' --force
+          for b in $BRANCHES; do
+            f="/tmp/scan/${b}.json"
+            [ -f "$f" ] || continue
+            title="Fixable high/critical vulnerabilities in ${b}"
+            issue=$(gh issue list --label vulnerability-scan --state open --limit 100 --json number,title \
+              | jq -r --arg t "$title" '.[] | select(.title == $t) | .number' | head -1)
+            findings=$(jq -c '[.matches[]
+                | select(.vulnerability.severity == "Critical" or .vulnerability.severity == "High")
+                | (.vulnerability.id) as $id
+                | {sev: .vulnerability.severity, id: $id,
+                   url: (if ($id | startswith("GO-")) then "https://pkg.go.dev/vuln/\($id)"
+                         elif ($id | startswith("GHSA-")) then "https://github.com/advisories/\($id)"
+                         elif ($id | startswith("CVE-")) then "https://nvd.nist.gov/vuln/detail/\($id)"
+                         else (.vulnerability.dataSource // "") end),
+                   pkg: .artifact.name, ver: .artifact.version,
+                   fix: (.vulnerability.fix.versions // [] | join(", ")),
+                   path: (.artifact.locations[0].path // "")}]
+              | unique | sort_by((if .sev == "Critical" then 0 else 1 end), .path, .id)' "$f")
+            count=$(jq length <<<"$findings")
+
+            if [ "$count" -eq 0 ]; then
+              echo "${b}: clean"
+              [ -z "$issue" ] || gh issue close "$issue" \
+                --comment "No fixable high or critical findings in \`${b}\` as of ${RUN_URL}. Closing."
+              continue
+            fi
+
+            echo "::warning::${b}: ${count} fixable high/critical findings"
+            {
+              echo "The weekly Grype scan of \`coreproc/laravel-php:${b}\` (linux/amd64) found ${count} high or critical vulnerabilities that have a fix available."
+              echo
+              echo "| Severity | ID | Package | Fixed in | Location |"
+              echo "|---|---|---|---|---|"
+              jq -r '.[] | "| \(.sev) | [\(.id)](\(.url)) | `\(.pkg)` \(.ver) | \(.fix) | `\(.path)` |"' <<<"$findings"
+              echo
+              echo "**Where the fix comes from**"
+              echo
+              echo '- `/usr/local/bin/supercronic`: the "Supercronic version check" workflow, once Supercronic ships a release built with a fixed Go. If it already has, check that workflow for a failed run or an open PR.'
+              echo '- Alpine (`apk`) packages: usually the next weekly rebuild, which re-resolves the base image and packages.'
+              echo '- Binaries that come with the base image (such as `/usr/local/bin/frankenphp`): upstream has to publish a fixed image; the weekly rebuild then picks it up.'
+              echo
+              echo "Each scan rewrites this issue and closes it once the tag is clean. Last scan: ${RUN_URL}"
+            } > /tmp/body.md
+
+            if [ -z "$issue" ]; then
+              gh issue create --title "$title" --label vulnerability-scan --body-file /tmp/body.md
+              continue
+            fi
+            old=$(gh issue view "$issue" --json body --jq .body)
+            gh issue edit "$issue" --body-file /tmp/body.md
+            # Editing a body notifies nobody, so comment when something new shows up.
+            new=$(jq -r '.[].id' <<<"$findings" | sort -u | while read -r id; do
+              grep -qF "[${id}]" <<<"$old" || echo "$id"
+            done | paste -sd ' ' -)
+            [ -z "$new" ] || gh issue comment "$issue" --body "New since the last scan: ${new}. See ${RUN_URL}."
+          done
