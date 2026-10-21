@@ -31,7 +31,7 @@ Preferred publishing path: the "Build and push images" workflow (Actions tab, or
 ## Dockerfile conventions
 
 - Build-only packages go in the `.build-deps` virtual apk package and are removed in the final cleanup step (`apk del .build-deps`) to keep the image small.
-- `xdebug` and `pcov` are installed via pecl but intentionally **not enabled** — downstream dev environments enable them.
+- `xdebug` and `pcov` are installed via PIE (not pecl) but intentionally **not enabled** — downstream dev environments enable them.
 - `gd-dev` is deliberately removed after the gd extension is built (`apk del gd-dev`) to drop libtiff CVEs from the final image — don't "clean up" that line.
 
 ## Releases
