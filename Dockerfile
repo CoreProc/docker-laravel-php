@@ -55,12 +55,18 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
     pcntl \
     zip
 
-# Install Redis extension.
-RUN pecl install redis \
-    && docker-php-ext-enable redis
+# PIE (PHP's official extension installer) resolves extensions through
+# Packagist and builds them from GitHub, so builds no longer depend on
+# pecl.php.net, which returned 500/502 for hours during the October 21, 2026
+# PHP security release. Pinned by digest; bump the tag and digest together.
+COPY --from=ghcr.io/php/pie:1.5.2-bin@sha256:a254c78b51ca34daef0541fa1cf0147385c93ba5ca799868392275d947f00fe7 /pie /usr/bin/pie
 
-# Install xdebug and pcov but don't enable it.
-RUN pecl install xdebug pcov
+# Install the Redis extension.
+RUN pie install phpredis/phpredis:^6.3
+
+# Install xdebug and pcov but don't enable them.
+RUN pie install --skip-enable-extension xdebug/xdebug:^3.5 \
+    && pie install --skip-enable-extension pecl/pcov:^1.0
 
 # Copy composer executable.
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
