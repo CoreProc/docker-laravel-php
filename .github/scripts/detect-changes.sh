@@ -17,11 +17,15 @@
 #                              as each `pie install vendor/pkg:^X.Y`
 #
 # Env: BRANCHES (space-separated), FORCE, REPO (owner/name), IMAGE.
-# Writes to $GITHUB_OUTPUT: build, a JSON array of {branch, sha, inputs} for
-# the variants to rebuild. Writes a table to $GITHUB_STEP_SUMMARY. Both
-# default to stdout for local runs.
+# Writes to $GITHUB_OUTPUT: build, a JSON array of {branch, sha, inputs,
+# contexts} for the variants to rebuild, where contexts pins each image to the
+# digest recorded in inputs (docker/build-push-action build-contexts). Writes
+# a table to $GITHUB_STEP_SUMMARY. Both default to stdout for local runs.
+#
+# Only the linux/amd64 image is compared; arm64 is built from the same inputs.
+# Any failed lookup stops the run, so a registry or Packagist outage fails the
+# day's build loudly instead of reading as "no change".
 set -euo pipefail
-# A failed lookup inside $(...) must stop the run, not read as "no change".
 shopt -s inherit_errexit
 
 : "${BRANCHES:?}" "${REPO:?}" "${IMAGE:=coreproc/laravel-php}" "${FORCE:=false}"
@@ -30,17 +34,21 @@ summary=${GITHUB_STEP_SUMMARY:-/dev/stdout}
 here=$(dirname "$0")
 label=com.coreproc.laravel-php
 
-# Image references in FROM and COPY --from, minus build stage names and
-# references already pinned by digest (those change only with a commit).
+# Image references in FROM and COPY --from, minus build stages (by name or
+# number), scratch, ARG-built references, and references already pinned by
+# digest (those change only with a commit).
 image_refs() {
   awk '
     toupper($1) == "FROM" {
       for (i = 2; i <= NF && $i ~ /^--/; i++) ;
       r[$i]
-      if (toupper($(i + 1)) == "AS") s[$(i + 2)]
+      if (toupper($(i + 1)) == "AS") s[tolower($(i + 2))]
     }
     toupper($1) == "COPY" { for (i = 2; i <= NF; i++) if (sub(/^--from=/, "", $i)) r[$i] }
-    END { for (x in r) if (!(x in s) && x !~ /@sha256:/) print x }' <<<"$1" | sort
+    END {
+      for (x in r)
+        if (!(tolower(x) in s) && x != "scratch" && x !~ /^[0-9]+$/ && x !~ /[$@]/) print x
+    }' <<<"$1" | sort
 }
 
 # vendor/package[:constraint] arguments to `pie install`.
@@ -68,11 +76,14 @@ added() {
 
 # Why ${IMAGE}:$1 needs a rebuild for inputs $2; prints nothing if it does not.
 reason() {
-  local labels old_inputs old_pending
+  local labels old_inputs old_pending pending
   [ "$FORCE" != true ] || { echo forced; return; }
-  labels=$(docker buildx imagetools inspect "${IMAGE}:$1" \
-    --format '{{json (index .Image "linux/amd64").Config.Labels}}' 2>/dev/null) \
-    || { echo 'tag not published'; return; }
+  if ! labels=$(docker buildx imagetools inspect "${IMAGE}:$1" \
+      --format '{{json (index .Image "linux/amd64").Config.Labels}}' 2>&1); then
+    [[ $labels == *": not found"* ]] || { echo "$labels" >&2; return 1; }
+    echo 'tag not published'
+    return
+  fi
   { read -r old_inputs; read -r old_pending; } < <(jq -r --arg l "$label" \
     '(. // {}) | .[$l + ".inputs"] // "", .[$l + ".apk-pending"] // ""' <<<"$labels")
   [ -n "$old_inputs" ] || { echo 'published image has no build labels'; return; }
@@ -80,7 +91,8 @@ reason() {
     added "$old_inputs" "$2" | grep . || echo 'an input was removed'
     return
   fi
-  added "$old_pending" "$("${here}/apk-pending.sh" "${IMAGE}:$1" | paste -sd ' ' -)" | sed -n 's/./apk: &/p'
+  pending=$("${here}/apk-pending.sh" "${IMAGE}:$1" | paste -sd ' ' -)
+  added "$old_pending" "$pending" | sed -n 's/./apk: &/p'
 }
 
 # Run "${@:2}" once per key $1 and leave the result in $REPLY: the same base
@@ -102,9 +114,11 @@ for b in $BRANCHES; do
   dockerfile=$(gh api -H 'Accept: application/vnd.github.raw' "repos/${REPO}/contents/Dockerfile?ref=${sha}")
 
   tokens=("revision=${sha}")
+  contexts=''
   while read -r ref; do
     resolve "$ref" docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}'
     tokens+=("${ref}=${REPLY}")
+    contexts+="${ref}=docker-image://${ref}@${REPLY}"$'\n'
   done < <(image_refs "$dockerfile")
   while read -r pkg; do
     resolve "$pkg" packagist_latest "$pkg"
@@ -114,7 +128,8 @@ for b in $BRANCHES; do
 
   why=$(reason "$b" "$inputs")
   if [ -n "$why" ]; then
-    build=$(jq -c --arg b "$b" --arg sha "$sha" --arg i "$inputs" '. + [{branch: $b, sha: $sha, inputs: $i}]' <<<"$build")
+    build=$(jq -c --arg b "$b" --arg sha "$sha" --arg i "$inputs" --arg c "$contexts" \
+      '. + [{branch: $b, sha: $sha, inputs: $i, contexts: $c}]' <<<"$build")
     echo "| \`${b}\` | yes | ${why} |" >>"$summary"
   else
     echo "| \`${b}\` | no | unchanged |" >>"$summary"

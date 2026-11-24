@@ -121,6 +121,7 @@ jobs:
         with:
           context: .
           platforms: linux/${{ matrix.platform.arch }}
+          build-contexts: ${{ matrix.variant.contexts }}
           load: true
           tags: smoke-test:${{ matrix.variant.branch }}
 
@@ -137,16 +138,19 @@ jobs:
       - name: Record pending Alpine upgrades
         id: pending
         run: |
-          echo "list=$(ci/.github/scripts/apk-pending.sh smoke-test:${{ matrix.variant.branch }} ${{ matrix.platform.arch }} | paste -sd ' ' -)" >> "$GITHUB_OUTPUT"
+          list=$(ci/.github/scripts/apk-pending.sh smoke-test:${{ matrix.variant.branch }} ${{ matrix.platform.arch }} | paste -sd ' ' -)
+          echo "list=${list}" >> "$GITHUB_OUTPUT"
 
-      # Same layers as the smoke-tested image (the builder cache is warm); the
-      # labels only change the image config.
+      # Same layers as the smoke-tested image: the same pinned base and
+      # composer digests, and the builder cache is warm. The labels only
+      # change the image config.
       - name: Push by digest
         id: push
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/${{ matrix.platform.arch }}
+          build-contexts: ${{ matrix.variant.contexts }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ matrix.variant.sha }}
@@ -169,6 +173,8 @@ jobs:
 
   merge-and-tag:
     needs: [detect, build]
+    # Tag the variants that built even when another variant's build failed.
+    if: ${{ !cancelled() && needs.detect.result == 'success' && needs.detect.outputs.build != '[]' }}
     strategy:
       fail-fast: false
       matrix:
@@ -191,6 +197,12 @@ jobs:
       - name: Create multi-arch manifest and tag
         working-directory: /tmp/digests
         run: |
+          # Never publish a variant with an arch missing.
+          set -- *
+          if [ "$#" -ne 2 ]; then
+            echo "::error::${{ matrix.variant.branch }}: expected 2 arch digests, found: $*"
+            exit 1
+          fi
           docker buildx imagetools create -t coreproc/laravel-php:${{ matrix.variant.branch }} \
             $(printf 'coreproc/laravel-php@sha256:%s ' *)
 
@@ -200,9 +212,9 @@ jobs:
   scan:
     needs: [detect, merge-and-tag]
     # Runs every day, rebuilt or not: new CVEs get published against images
-    # that have not changed. Scans whatever is published, even when one
-    # variant's build failed.
-    if: ${{ !cancelled() && needs.detect.result == 'success' }}
+    # that have not changed. Scans whatever is published, even when detect or
+    # one variant's build failed.
+    if: ${{ !cancelled() && needs.detect.outputs.selected != '' }}
     runs-on: ubuntu-latest
     permissions:
       issues: write
