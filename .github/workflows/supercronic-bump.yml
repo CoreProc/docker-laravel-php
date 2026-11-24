@@ -1,20 +1,20 @@
 name: Supercronic version check
 
-# Weekly check of https://github.com/aptible/supercronic/releases. When a new
+# Daily check of https://github.com/aptible/supercronic/releases. When a new
 # release appears, every variant branch that is behind gets SUPERCRONIC_VERSION
 # and both per-arch SHA1 checksums updated (computed from the downloaded
 # binaries — the Supercronic README no longer publishes sums), then the bumped
 # Dockerfile is built and smoke-tested natively on amd64 and arm64.
 #
-# A variant that passes on both arches is committed straight to its branch, so
-# the Monday 18:00 rebuild publishes it; a manual run also dispatches that
-# rebuild itself. A variant that fails gets a PR for a human instead, and the
+# A variant that passes on both arches is committed straight to its branch.
+# The new branch commit is an input the daily 18:00 build checks, so that
+# build publishes it; a manual run also dispatches the build right away. A variant that fails gets a PR for a human instead, and the
 # run fails so GitHub sends a notification. Bumps used to always wait in PRs,
 # which sat unmerged for months while the images shipped a vulnerable Go.
 
 on:
   schedule:
-    - cron: '0 16 * * 1' # Mondays 16:00 UTC, before the Monday 18:00 rebuild
+    - cron: '0 16 * * *' # Daily 16:00 UTC, before the daily 18:00 build
   workflow_dispatch:
 
 permissions:
@@ -203,7 +203,7 @@ jobs:
           body: |
             Automated bump of Supercronic to [${{ needs.detect.outputs.version }}](https://github.com/aptible/supercronic/releases/tag/${{ needs.detect.outputs.version }}) on `${{ matrix.branch }}`.
 
-            **The smoke test failed on at least one arch** (see ${{ env.RUN_URL }}), so this was not committed automatically. Fix the branch, then merge and run "Build and push images" for it. The next weekly check closes this PR on its own if the bump passes.
+            **The smoke test failed on at least one arch** (see ${{ env.RUN_URL }}), so this was not committed automatically. Fix the branch, then merge; the next daily "Build and push images" run publishes it. The next daily check closes this PR on its own if the bump passes.
           delete-branch: true
 
       - name: Fail so the smoke failure gets noticed
@@ -214,7 +214,8 @@ jobs:
 
   rebuild:
     needs: apply
-    # Scheduled runs leave publishing to the Monday 18:00 rebuild.
+    # Scheduled runs leave publishing to the daily 18:00 build. The dispatched
+    # build still checks inputs, so it only rebuilds the variants bumped here.
     if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.apply.result != 'skipped' }}
     runs-on: ubuntu-latest
     permissions:
@@ -225,3 +226,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: gh workflow run build-images.yml --ref main -f branch=all
+
+  # GitHub disables scheduled workflows in a public repo after 60 days with no
+  # repository activity; it did so to the Supercronic check on 2026-10-19,
+  # silently. Re-enabling an active workflow resets that timer, so every run
+  # renews both schedules without needing keepalive commits.
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Keep both scheduled workflows enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for wf in build-images.yml supercronic-bump.yml; do
+            gh api -X PUT "repos/${GH_REPO}/actions/workflows/${wf}/enable"
+            echo "${wf}: $(gh api "repos/${GH_REPO}/actions/workflows/${wf}" --jq .state)"
+          done
