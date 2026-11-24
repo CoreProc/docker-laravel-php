@@ -52,7 +52,6 @@ jobs:
     outputs:
       selected: ${{ steps.select.outputs.branches }}
       build: ${{ steps.detect.outputs.build }}
-      inputs: ${{ steps.detect.outputs.inputs }}
     steps:
       - id: select
         env:
@@ -89,7 +88,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: ${{ fromJSON(needs.detect.outputs.build) }}
+        # {branch, sha, inputs} for each variant to rebuild.
+        variant: ${{ fromJSON(needs.detect.outputs.build) }}
         platform:
           - arch: amd64
             runner: ubuntu-latest
@@ -100,7 +100,7 @@ jobs:
       # The commit the detect job looked at, so the labels describe this build.
       - uses: actions/checkout@v5
         with:
-          ref: ${{ fromJSON(needs.detect.outputs.inputs)[matrix.branch].sha }}
+          ref: ${{ matrix.variant.sha }}
 
       - uses: actions/checkout@v5
         with:
@@ -122,11 +122,11 @@ jobs:
           context: .
           platforms: linux/${{ matrix.platform.arch }}
           load: true
-          tags: smoke-test:${{ matrix.branch }}
+          tags: smoke-test:${{ matrix.variant.branch }}
 
       - name: Smoke test (native ${{ matrix.platform.arch }})
         run: |
-          docker run --rm smoke-test:${{ matrix.branch }} sh -ec '
+          docker run --rm smoke-test:${{ matrix.variant.branch }} sh -ec '
             php -v
             supercronic -version
             echo "* * * * * true" > /tmp/ct
@@ -137,7 +137,7 @@ jobs:
       - name: Record pending Alpine upgrades
         id: pending
         run: |
-          echo "list=$(ci/.github/scripts/apk-pending.sh smoke-test:${{ matrix.branch }} ${{ matrix.platform.arch }} | paste -sd ' ' -)" >> "$GITHUB_OUTPUT"
+          echo "list=$(ci/.github/scripts/apk-pending.sh smoke-test:${{ matrix.variant.branch }} ${{ matrix.platform.arch }} | paste -sd ' ' -)" >> "$GITHUB_OUTPUT"
 
       # Same layers as the smoke-tested image (the builder cache is warm); the
       # labels only change the image config.
@@ -149,8 +149,8 @@ jobs:
           platforms: linux/${{ matrix.platform.arch }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ fromJSON(needs.detect.outputs.inputs)[matrix.branch].sha }}
-            com.coreproc.laravel-php.inputs=${{ fromJSON(needs.detect.outputs.inputs)[matrix.branch].inputs }}
+            org.opencontainers.image.revision=${{ matrix.variant.sha }}
+            com.coreproc.laravel-php.inputs=${{ matrix.variant.inputs }}
             com.coreproc.laravel-php.apk-pending=${{ steps.pending.outputs.list }}
           outputs: type=image,name=coreproc/laravel-php,push-by-digest=true,name-canonical=true,push=true
 
@@ -162,7 +162,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.branch }}-${{ matrix.platform.arch }}
+          name: digests-${{ matrix.variant.branch }}-${{ matrix.platform.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -172,13 +172,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: ${{ fromJSON(needs.detect.outputs.build) }}
+        variant: ${{ fromJSON(needs.detect.outputs.build) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
-          pattern: digests-${{ matrix.branch }}-*
+          pattern: digests-${{ matrix.variant.branch }}-*
           merge-multiple: true
 
       - uses: docker/setup-buildx-action@v3
@@ -191,11 +191,11 @@ jobs:
       - name: Create multi-arch manifest and tag
         working-directory: /tmp/digests
         run: |
-          docker buildx imagetools create -t coreproc/laravel-php:${{ matrix.branch }} \
+          docker buildx imagetools create -t coreproc/laravel-php:${{ matrix.variant.branch }} \
             $(printf 'coreproc/laravel-php@sha256:%s ' *)
 
       - name: Inspect published tag
-        run: docker buildx imagetools inspect coreproc/laravel-php:${{ matrix.branch }}
+        run: docker buildx imagetools inspect coreproc/laravel-php:${{ matrix.variant.branch }}
 
   scan:
     needs: [detect, merge-and-tag]
