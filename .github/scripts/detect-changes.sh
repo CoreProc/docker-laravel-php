@@ -16,11 +16,14 @@
 #   <package>=<version>        newest stable Packagist release in the same major
 #                              as each `pie install vendor/pkg:^X.Y`
 #
-# Env: BRANCHES (space-separated), FORCE, REPO (owner/name), IMAGE.
-# Writes to $GITHUB_OUTPUT: build, a JSON array of {branch, sha, inputs,
-# contexts} for the variants to rebuild, where contexts pins each image to the
-# digest recorded in inputs (docker/build-push-action build-contexts). Writes
-# a table to $GITHUB_STEP_SUMMARY. Both default to stdout for local runs.
+# Env: BRANCHES (space-separated), FORCE, REPO (owner/name), IMAGE, PLAN_FILE.
+# Writes to $GITHUB_OUTPUT: build, a JSON array of the branches to rebuild.
+# Writes to $PLAN_FILE (if set) a JSON array of {branch, sha, inputs,
+# contexts} for them, where contexts pins each image to the digest recorded in
+# inputs (docker/build-push-action build-contexts). These details cannot be a
+# job output: GitHub drops any job output that contains a value matching one
+# of the workflow's secrets, and they did. Writes a table to
+# $GITHUB_STEP_SUMMARY. Output and summary default to stdout for local runs.
 #
 # Only the linux/amd64 image is compared; arm64 is built from the same inputs.
 # Any failed lookup stops the run, so a registry or Packagist outage fails the
@@ -136,4 +139,5 @@ for b in $BRANCHES; do
   fi
 done
 
-echo "build=${build}" >>"$out"
+echo "build=$(jq -c 'map(.branch)' <<<"$build")" >>"$out"
+[ -z "${PLAN_FILE:-}" ] || echo "$build" >"$PLAN_FILE"
