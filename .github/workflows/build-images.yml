@@ -51,7 +51,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       selected: ${{ steps.select.outputs.branches }}
-      build: ${{ steps.detect.outputs.build }}
     steps:
       - id: select
         env:
@@ -80,16 +79,40 @@ jobs:
           REPO: ${{ github.repository }}
           BRANCHES: ${{ steps.select.outputs.branches }}
           FORCE: ${{ inputs.force || false }}
-        run: .github/scripts/detect-changes.sh
+        run: |
+          mkdir -p plan
+          GITHUB_OUTPUT=plan/build.txt .github/scripts/detect-changes.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan
+          path: plan/build.txt
+          retention-days: 1
+
+  # GitHub drops a job output that contains any secret value used in that job
+  # ("Skip output 'build' since it may contain secret"), and detect logs in to
+  # Docker Hub. This job uses no secrets, so it can pass the plan on.
+  plan:
+    needs: detect
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.read.outputs.build }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan
+
+      - id: read
+        run: cat build.txt >> "$GITHUB_OUTPUT"
 
   build:
-    needs: detect
-    if: needs.detect.outputs.build != '[]'
+    needs: plan
+    if: needs.plan.outputs.build != '[]'
     strategy:
       fail-fast: false
       matrix:
         # {branch, sha, inputs} for each variant to rebuild.
-        variant: ${{ fromJSON(needs.detect.outputs.build) }}
+        variant: ${{ fromJSON(needs.plan.outputs.build) }}
         platform:
           - arch: amd64
             runner: ubuntu-latest
@@ -172,13 +195,13 @@ jobs:
           retention-days: 1
 
   merge-and-tag:
-    needs: [detect, build]
+    needs: [plan, build]
     # Tag the variants that built even when another variant's build failed.
-    if: ${{ !cancelled() && needs.detect.result == 'success' && needs.detect.outputs.build != '[]' }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.build != '[]' }}
     strategy:
       fail-fast: false
       matrix:
-        variant: ${{ fromJSON(needs.detect.outputs.build) }}
+        variant: ${{ fromJSON(needs.plan.outputs.build) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
