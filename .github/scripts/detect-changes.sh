@@ -79,14 +79,18 @@ added() {
 
 # Why ${IMAGE}:$1 needs a rebuild for inputs $2; prints nothing if it does not.
 reason() {
-  local labels old_inputs old_pending pending
+  local index amd64 labels old_inputs old_pending pending
   [ "$FORCE" != true ] || { echo forced; return; }
-  if ! labels=$(docker buildx imagetools inspect "${IMAGE}:$1" \
-      --format '{{json (index .Image "linux/amd64").Config.Labels}}' 2>&1); then
-    [[ $labels == *": not found"* ]] || { echo "$labels" >&2; return 1; }
+  # The index, then only the amd64 manifest and config: about one Docker Hub
+  # pull, where inspecting every platform costs several.
+  if ! index=$(docker buildx imagetools inspect --raw "${IMAGE}:$1" 2>&1); then
+    [[ $index == *": not found"* ]] || { echo "$index" >&2; return 1; }
     echo 'tag not published'
     return
   fi
+  amd64=$(jq -r '.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' <<<"$index")
+  [ -n "$amd64" ] || { echo 'published tag has no linux/amd64 image'; return; }
+  labels=$(docker buildx imagetools inspect "${IMAGE}@${amd64}" --format '{{json .Image.Config.Labels}}')
   { read -r old_inputs; read -r old_pending; } < <(jq -r --arg l "$label" \
     '(. // {}) | .[$l + ".inputs"] // "", .[$l + ".apk-pending"] // ""' <<<"$labels")
   [ -n "$old_inputs" ] || { echo 'published image has no build labels'; return; }
@@ -94,7 +98,7 @@ reason() {
     added "$old_inputs" "$2" | grep . || echo 'an input was removed'
     return
   fi
-  pending=$("${here}/apk-pending.sh" "${IMAGE}:$1" | paste -sd ' ' -)
+  pending=$("${here}/apk-pending.sh" "${IMAGE}@${amd64}" | paste -sd ' ' -)
   added "$old_pending" "$pending" | sed -n 's/./apk: &/p'
 }
 
