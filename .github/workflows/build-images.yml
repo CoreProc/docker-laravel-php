@@ -1,24 +1,29 @@
 name: Build and push images
 
-# Weekly rebuild of every variant so images pick up Alpine/PHP security updates
-# from their (floating) base tags, plus manual runs for a single variant.
+# Daily check of every variant, rebuilding only the ones whose inputs changed
+# (see .github/scripts/detect-changes.sh): the variant branch, the base and
+# composer image digests, the PIE extension releases, and Alpine package
+# upgrades. Each published image records its inputs in labels, so a day with
+# no upstream changes publishes nothing. Manual runs can target one variant
+# and can force a rebuild.
+#
 # Each arch builds and smoke-tests natively (no QEMU), pushes by digest, and a
 # merge job stitches the multi-arch manifest — the branch tag on Docker Hub is
 # only updated after both arches pass.
 #
-# A final job scans each published tag with Grype and keeps one issue per
-# variant (label "vulnerability-scan") listing fixable high/critical findings,
-# closing it once the tag is clean. Findings never block publishing: many come
-# from upstream base images, and blocking would also hold back the security
-# updates this rebuild exists to ship.
+# A final job scans each published tag with Grype every day, rebuilt or not,
+# and keeps one issue per variant (label "vulnerability-scan") listing fixable
+# high/critical findings, closing it once the tag is clean. Findings never
+# block publishing: many come from upstream base images, and blocking would
+# also hold back the security updates this rebuild exists to ship.
 
 on:
   schedule:
-    - cron: '0 18 * * 1' # Mondays 18:00 UTC = Tuesdays 02:00 Asia/Manila
+    - cron: '0 18 * * *' # Daily 18:00 UTC = 02:00 Asia/Manila
   workflow_dispatch:
     inputs:
       branch:
-        description: 'Variant branch to build'
+        description: 'Variant branch to check'
         type: choice
         default: all
         options:
@@ -29,6 +34,10 @@ on:
           - 8.4-frankenphp-alpine
           - 8.5-fpm-alpine
           - 8.5-frankenphp-alpine
+      force:
+        description: 'Rebuild even if nothing changed'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,25 +47,49 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prepare:
+  detect:
     runs-on: ubuntu-latest
     outputs:
-      branches: ${{ steps.set.outputs.branches }}
+      selected: ${{ steps.select.outputs.branches }}
+      build: ${{ steps.detect.outputs.build }}
+      inputs: ${{ steps.detect.outputs.inputs }}
     steps:
-      - id: set
+      - id: select
+        env:
+          BRANCH: ${{ inputs.branch || 'all' }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.branch }}" != "all" ]; then
-            echo 'branches=["${{ inputs.branch }}"]' >> "$GITHUB_OUTPUT"
+          if [ "$BRANCH" = all ]; then
+            echo 'branches=8.3-fpm-alpine 8.3-frankenphp-alpine 8.4-fpm-alpine 8.4-frankenphp-alpine 8.5-fpm-alpine 8.5-frankenphp-alpine' >> "$GITHUB_OUTPUT"
           else
-            echo 'branches=["8.3-fpm-alpine","8.3-frankenphp-alpine","8.4-fpm-alpine","8.4-frankenphp-alpine","8.5-fpm-alpine","8.5-frankenphp-alpine"]' >> "$GITHUB_OUTPUT"
+            echo "branches=${BRANCH}" >> "$GITHUB_OUTPUT"
           fi
 
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: .github/scripts
+
+      # Logged in for the Docker Hub pull rate limit.
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Find variants whose inputs changed
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCHES: ${{ steps.select.outputs.branches }}
+          FORCE: ${{ inputs.force || false }}
+        run: .github/scripts/detect-changes.sh
+
   build:
-    needs: prepare
+    needs: detect
+    if: needs.detect.outputs.build != '[]'
     strategy:
       fail-fast: false
       matrix:
-        branch: ${{ fromJSON(needs.prepare.outputs.branches) }}
+        branch: ${{ fromJSON(needs.detect.outputs.build) }}
         platform:
           - arch: amd64
             runner: ubuntu-latest
@@ -64,9 +97,15 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.platform.runner }}
     steps:
+      # The commit the detect job looked at, so the labels describe this build.
       - uses: actions/checkout@v5
         with:
-          ref: ${{ matrix.branch }}
+          ref: ${{ fromJSON(needs.detect.outputs.inputs)[matrix.branch].sha }}
+
+      - uses: actions/checkout@v5
+        with:
+          path: ci
+          sparse-checkout: .github/scripts
 
       - uses: docker/setup-buildx-action@v3
 
@@ -75,8 +114,8 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # No cache-from/cache-to on purpose: the weekly rebuild must re-resolve
-      # the base image and apk/pecl packages to pick up security updates.
+      # No cache-from/cache-to on purpose: a rebuild must re-resolve the base
+      # image and apk/PIE packages to pick up security updates.
       - name: Build for smoke test
         uses: docker/build-push-action@v6
         with:
@@ -93,12 +132,26 @@ jobs:
             echo "* * * * * true" > /tmp/ct
             supercronic -test /tmp/ct'
 
+      # Upgrades this fresh build still could not apply (packages from the
+      # base image), so the daily check does not rebuild for them again.
+      - name: Record pending Alpine upgrades
+        id: pending
+        run: |
+          echo "list=$(ci/.github/scripts/apk-pending.sh smoke-test:${{ matrix.branch }} ${{ matrix.platform.arch }} | paste -sd ' ' -)" >> "$GITHUB_OUTPUT"
+
+      # Same layers as the smoke-tested image (the builder cache is warm); the
+      # labels only change the image config.
       - name: Push by digest
         id: push
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/${{ matrix.platform.arch }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ fromJSON(needs.detect.outputs.inputs)[matrix.branch].sha }}
+            com.coreproc.laravel-php.inputs=${{ fromJSON(needs.detect.outputs.inputs)[matrix.branch].inputs }}
+            com.coreproc.laravel-php.apk-pending=${{ steps.pending.outputs.list }}
           outputs: type=image,name=coreproc/laravel-php,push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
@@ -115,11 +168,11 @@ jobs:
           retention-days: 1
 
   merge-and-tag:
-    needs: [prepare, build]
+    needs: [detect, build]
     strategy:
       fail-fast: false
       matrix:
-        branch: ${{ fromJSON(needs.prepare.outputs.branches) }}
+        branch: ${{ fromJSON(needs.detect.outputs.build) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -145,16 +198,18 @@ jobs:
         run: docker buildx imagetools inspect coreproc/laravel-php:${{ matrix.branch }}
 
   scan:
-    needs: [prepare, merge-and-tag]
-    # Scan whatever is published, even when one variant's build failed.
-    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    needs: [detect, merge-and-tag]
+    # Runs every day, rebuilt or not: new CVEs get published against images
+    # that have not changed. Scans whatever is published, even when one
+    # variant's build failed.
+    if: ${{ !cancelled() && needs.detect.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       issues: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      BRANCHES: ${{ join(fromJSON(needs.prepare.outputs.branches), ' ') }}
+      BRANCHES: ${{ needs.detect.outputs.selected }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       # Pinned by digest, not tag: the Trivy action's tags were hijacked in
       # March 2026, and this job holds a token that can write issues.
@@ -181,7 +236,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           gh label create vulnerability-scan --color B60205 \
-            --description 'Fixable high/critical findings from the weekly Grype scan' --force
+            --description 'Fixable high/critical findings from the daily Grype scan' --force
           for b in $BRANCHES; do
             f="/tmp/scan/${b}.json"
             [ -f "$f" ] || continue
@@ -211,7 +266,7 @@ jobs:
 
             echo "::warning::${b}: ${count} fixable high/critical findings"
             {
-              echo "The weekly Grype scan of \`coreproc/laravel-php:${b}\` (linux/amd64) found ${count} high or critical vulnerabilities that have a fix available."
+              echo "The daily Grype scan of \`coreproc/laravel-php:${b}\` (linux/amd64) found ${count} high or critical vulnerabilities that have a fix available."
               echo
               echo "| Severity | ID | Package | Fixed in | Location |"
               echo "|---|---|---|---|---|"
@@ -220,8 +275,8 @@ jobs:
               echo "**Where the fix comes from**"
               echo
               echo '- `/usr/local/bin/supercronic`: the "Supercronic version check" workflow, once Supercronic ships a release built with a fixed Go. If it already has, check that workflow for a failed run or an open PR.'
-              echo '- Alpine (`apk`) packages: usually the next weekly rebuild, which re-resolves the base image and packages.'
-              echo '- Binaries that come with the base image (such as `/usr/local/bin/frankenphp`): upstream has to publish a fixed image; the weekly rebuild then picks it up.'
+              echo '- Alpine (`apk`) packages: the next daily build after Alpine publishes the fix for a package this image installs; for a package that comes with the base image, once upstream rebuilds that image.'
+              echo '- Binaries that come with the base image (such as `/usr/local/bin/frankenphp`): upstream has to publish a fixed image; the next daily build then picks it up.'
               echo
               echo "Each scan rewrites this issue and closes it once the tag is clean. Last scan: ${RUN_URL}"
             } > /tmp/body.md
