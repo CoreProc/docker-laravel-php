@@ -85,6 +85,11 @@ jobs:
         with:
           ref: ${{ matrix.branch }}
 
+      - uses: actions/checkout@v5
+        with:
+          path: ci
+          sparse-checkout: .github/scripts
+
       - name: Update Dockerfile
         run: |
           sed -i \
@@ -110,12 +115,7 @@ jobs:
           tags: smoke-test:${{ matrix.branch }}
 
       - name: Smoke test (native ${{ matrix.platform.arch }})
-        run: |
-          docker run --rm -e VERSION smoke-test:${{ matrix.branch }} sh -ec '
-            php -v
-            [ "$(supercronic -version)" = "$VERSION" ]
-            echo "* * * * * true" > /tmp/ct
-            supercronic -test /tmp/ct'
+        run: ci/.github/scripts/smoke-test.sh smoke-test:${{ matrix.branch }} "$VERSION"
 
       - name: Record pass
         run: mkdir -p /tmp/pass && touch /tmp/pass/${{ matrix.platform.arch }}

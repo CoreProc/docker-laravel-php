@@ -154,12 +154,7 @@ jobs:
           tags: smoke-test:${{ matrix.branch }}
 
       - name: Smoke test (native ${{ matrix.platform.arch }})
-        run: |
-          docker run --rm smoke-test:${{ matrix.branch }} sh -ec '
-            php -v
-            supercronic -version
-            echo "* * * * * true" > /tmp/ct
-            supercronic -test /tmp/ct'
+        run: ci/.github/scripts/smoke-test.sh smoke-test:${{ matrix.branch }}
 
       # Upgrades this fresh build still could not apply (packages from the
       # base image), so the daily check does not rebuild for them again.
