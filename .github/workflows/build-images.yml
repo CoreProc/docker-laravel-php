@@ -80,7 +80,16 @@ jobs:
           REPO: ${{ github.repository }}
           BRANCHES: ${{ steps.select.outputs.branches }}
           FORCE: ${{ inputs.force || false }}
+          PLAN_FILE: plan.json
         run: .github/scripts/detect-changes.sh
+
+      # Per-variant details (commit, inputs, pinned digests) for the build
+      # jobs; see PLAN_FILE in detect-changes.sh for why not a job output.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan
+          path: plan.json
+          retention-days: 1
 
   build:
     needs: detect
@@ -88,8 +97,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # {branch, sha, inputs} for each variant to rebuild.
-        variant: ${{ fromJSON(needs.detect.outputs.build) }}
+        branch: ${{ fromJSON(needs.detect.outputs.build) }}
         platform:
           - arch: amd64
             runner: ubuntu-latest
@@ -97,10 +105,30 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.platform.runner }}
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan
+          path: ${{ runner.temp }}
+
+      - name: Load this variant's plan
+        id: plan
+        env:
+          PLAN: ${{ runner.temp }}/plan.json
+          BRANCH: ${{ matrix.branch }}
+        run: |
+          v=$(jq -c --arg b "$BRANCH" '.[] | select(.branch == $b)' "$PLAN")
+          {
+            echo "sha=$(jq -r .sha <<<"$v")"
+            echo "inputs=$(jq -r .inputs <<<"$v")"
+            echo 'contexts<<EOF_CONTEXTS'
+            jq -r .contexts <<<"$v"
+            echo 'EOF_CONTEXTS'
+          } >> "$GITHUB_OUTPUT"
+
       # The commit the detect job looked at, so the labels describe this build.
       - uses: actions/checkout@v5
         with:
-          ref: ${{ matrix.variant.sha }}
+          ref: ${{ steps.plan.outputs.sha }}
 
       - uses: actions/checkout@v5
         with:
@@ -121,13 +149,13 @@ jobs:
         with:
           context: .
           platforms: linux/${{ matrix.platform.arch }}
-          build-contexts: ${{ matrix.variant.contexts }}
+          build-contexts: ${{ steps.plan.outputs.contexts }}
           load: true
-          tags: smoke-test:${{ matrix.variant.branch }}
+          tags: smoke-test:${{ matrix.branch }}
 
       - name: Smoke test (native ${{ matrix.platform.arch }})
         run: |
-          docker run --rm smoke-test:${{ matrix.variant.branch }} sh -ec '
+          docker run --rm smoke-test:${{ matrix.branch }} sh -ec '
             php -v
             supercronic -version
             echo "* * * * * true" > /tmp/ct
@@ -138,7 +166,7 @@ jobs:
       - name: Record pending Alpine upgrades
         id: pending
         run: |
-          list=$(ci/.github/scripts/apk-pending.sh smoke-test:${{ matrix.variant.branch }} ${{ matrix.platform.arch }} | paste -sd ' ' -)
+          list=$(ci/.github/scripts/apk-pending.sh smoke-test:${{ matrix.branch }} ${{ matrix.platform.arch }} | paste -sd ' ' -)
           echo "list=${list}" >> "$GITHUB_OUTPUT"
 
       # Same layers as the smoke-tested image: the same pinned base and
@@ -150,11 +178,11 @@ jobs:
         with:
           context: .
           platforms: linux/${{ matrix.platform.arch }}
-          build-contexts: ${{ matrix.variant.contexts }}
+          build-contexts: ${{ steps.plan.outputs.contexts }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ matrix.variant.sha }}
-            com.coreproc.laravel-php.inputs=${{ matrix.variant.inputs }}
+            org.opencontainers.image.revision=${{ steps.plan.outputs.sha }}
+            com.coreproc.laravel-php.inputs=${{ steps.plan.outputs.inputs }}
             com.coreproc.laravel-php.apk-pending=${{ steps.pending.outputs.list }}
           outputs: type=image,name=coreproc/laravel-php,push-by-digest=true,name-canonical=true,push=true
 
@@ -166,7 +194,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.variant.branch }}-${{ matrix.platform.arch }}
+          name: digests-${{ matrix.branch }}-${{ matrix.platform.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -178,13 +206,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: ${{ fromJSON(needs.detect.outputs.build) }}
+        branch: ${{ fromJSON(needs.detect.outputs.build) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
-          pattern: digests-${{ matrix.variant.branch }}-*
+          pattern: digests-${{ matrix.branch }}-*
           merge-multiple: true
 
       - uses: docker/setup-buildx-action@v3
@@ -200,14 +228,14 @@ jobs:
           # Never publish a variant with an arch missing.
           set -- *
           if [ "$#" -ne 2 ]; then
-            echo "::error::${{ matrix.variant.branch }}: expected 2 arch digests, found: $*"
+            echo "::error::${{ matrix.branch }}: expected 2 arch digests, found: $*"
             exit 1
           fi
-          docker buildx imagetools create -t coreproc/laravel-php:${{ matrix.variant.branch }} \
+          docker buildx imagetools create -t coreproc/laravel-php:${{ matrix.branch }} \
             $(printf 'coreproc/laravel-php@sha256:%s ' *)
 
       - name: Inspect published tag
-        run: docker buildx imagetools inspect coreproc/laravel-php:${{ matrix.variant.branch }}
+        run: docker buildx imagetools inspect coreproc/laravel-php:${{ matrix.branch }}
 
   scan:
     needs: [detect, merge-and-tag]
