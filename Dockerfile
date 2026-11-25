@@ -1,6 +1,11 @@
 # Used for prod build.
 FROM php:8.3-fpm-alpine
 
+# Apply Alpine fixes to packages that come with the base image without
+# waiting for upstream to rebuild it. Before any apk add, so packages
+# installed below match the upgraded libraries.
+RUN apk upgrade --no-cache
+
 # Install dependencies.
 RUN apk add --no-cache --virtual .build-deps \
     $PHPIZE_DEPS \
